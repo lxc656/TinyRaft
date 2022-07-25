@@ -1,0 +1,3 @@
+This is a toy Raft implementation based on the start code of MIT 6.824 2022
+
+Slowly updating...
