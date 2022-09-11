@@ -21,11 +21,11 @@ import (
 	//	"bytes"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	//	"6.824/labgob"
 	"6.824/labrpc"
 )
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -50,6 +50,32 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type logEntry struct {
+	// 根据Raft论文中fig 2所描述的：
+	// each log entry contains command for state machine,
+	// and term when entry was received by leader(first index is 1)
+	term int
+	cmd  interface{}
+}
+
+const (
+	LEADER    = 0
+	CANDIDATE = 1
+	FOLLOWER  = 2
+)
+
+//调试时使用
+var State2String map[int]string
+
+const (
+	// 选举超时的时间范围(election timeout range)，单位是毫秒
+	// 也就是说我们设置的election timeout最终会是[200, 300]中的一个随机数
+	electionTimeoutRangeLeft  = 200
+	electionTimeoutRangeRight = 300
+	// 两次heartbeat的时间间隔，单位是毫秒
+	heartBeatTimeout = 100
+)
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -64,6 +90,46 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// 根据raft-extended论文fig 2中对于
+	// "Persist state on all servers"的描述
+	// 加入如下三个成员变量
+	currentTerm int // last term server has seen
+	// (Initialized to 0 on first boot, increases monotonically)
+
+	votedFor int // candidateId that received vote in current term
+	// (or null if none)
+
+	log []logEntry //log entries
+
+	// 根据论文fig 2中对于
+	// "volatile state on all servers"的描述
+	// 加入如下两个成员变量
+	commitIndex int // index of highest log entry known to be committed
+	// (initialized to 0, increases monotonically)
+
+	lastApplied int // index of highest log entry applied to state machine
+	// (initialized to 0, increases monotonically)
+
+	// 根据论文fig 2中对于
+	// "volatile state on leaders"的描述
+	// 加入如下两个成员变量
+	nextIndex []int // for each server, index of the
+	// next log entry to send to that server
+	// (initialized to leader last log index + 1)
+
+	matchIndex []int // for each server, index of
+	// highest log entry known to be replicated on server
+	// (initialized to 0, increases monotonically)
+
+	//用来记录当前这个raft peer的状态（是leader还是follower还是candidate）
+	state int
+
+	//如果这个raft peer是candidate的话，用如下的这个成员变量来记录获得的选票数量
+	receivedTickets int
+
+	//两个timeout
+	electionTimeout  time.Time
+	heartbeatTimeout time.Time
 }
 
 // return currentTerm and whether this server
@@ -73,6 +139,15 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock() //用来避免data race，在实验指南中的"Raft Locking Advice"里面有如下说明：
+	//Rule 3: Whenever code does a sequence of reads of shared data (or
+	//reads and writes), and would malfunction if another goroutine modified
+	//the data midway through the sequence, you should use a lock around the
+	//whole sequence.
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isleader = (rf.state == LEADER)
+	DebugGetInfo(rf)
 	return term, isleader
 }
 
@@ -91,7 +166,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -115,7 +189,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -135,7 +208,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 
 }
-
 
 //
 // example RequestVote RPC arguments structure.
@@ -194,7 +266,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -215,7 +286,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -266,6 +336,11 @@ func (rf *Raft) ticker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	State2String = map[int]string{
+		LEADER:    "Leader",
+		CANDIDATE: "Candidate",
+		FOLLOWER:  "Follower",
+	}
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -278,7 +353,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
